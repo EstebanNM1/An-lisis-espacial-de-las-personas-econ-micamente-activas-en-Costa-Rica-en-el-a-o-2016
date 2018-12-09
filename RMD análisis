@@ -1,0 +1,219 @@
+---
+title: "Untitled"
+author: "Esteban"
+date: "5 de diciembre de 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library('haven')
+library('sp')
+library('RColorBrewer')
+library('grid')
+library('lattice')
+library('ggplot2')
+library('readr')
+library('dplyr')
+library('raster')
+library('spatstat')
+library('maptools')
+library('plotrix')
+library('rgeos')
+library('spdep')
+library('leaflet')
+library("rgdal")
+library("BBmisc")
+```
+
+
+Cargando la base
+```{r}
+base1 <- read.csv("C:/Users/usuario/Desktop/estadística espacial/1/proyecto final/ccss.csv",header=TRUE,sep = ";")
+```
+
+Cargando shapefile
+```{r}
+CRI<-raster::getData('GADM',country='CRI',level=2)
+d<-extent(-86.25, -82.25,8, 11.5)
+CRI<-crop(CRI,d)
+plot(CRI)
+cri1<-CRI
+nombres<-data.frame(a=names(cri1@data))
+```
+
+Merge de datos
+Se adiere la base de datos dentro del objeto espacial
+```{r}
+names(base1)[1]<-'NAME_2'
+setdiff(CRI$NAME_2,base1$NAME_2)
+cri1@data<-sp::merge(base1,cri1@data,by='NAME_2')
+class(cri1)
+```
+
+
+#Creando la tasa de PEA
+pea/total*100
+```{r}
+cri1@data<-cri1@data %>% mutate(tasa.pea=P.E.A/Poblacion.total*100,
+                                tasa.pob.14=Poblacion.de.15...64.anos/Poblacion.total*100)
+```
+
+#mapa descriptivo
+PEA general
+```{r}
+m1 <- spplot(cri1, c("P.E.A"), xlim = c(-86.25, -82.25), ylim = c(8, 11.5) )
+m1
+```
+
+Tasa PEA
+
+```{r}
+m1 <- spplot(cri1, c("tasa.pea"), xlim = c(-86.25, -82.25), ylim = c(8, 11.5))
+m1
+```
+
+
+modelo completo:
+
+```{r}
+modelo.ols<-lm(tasa.pea~Viviendas.con.acceso.a.electricidad
+               +Total.de.viviendas
+               +patronos.total
+               +Pensiones.RNC
+
+, data = cri1)
+summary(modelo.ols)
+AIC(modelo.ols)
+```
+
+Dependencia espacial
+```{r}
+coords<-coordinates(cri1)
+IDs <- row.names(cri1)
+
+
+list.queen<-poly2nb(cri1, queen=TRUE)
+list.rock<-poly2nb(cri1, queen=FALSE)
+W<-nb2listw(list.queen, style="W")
+W2<-nb2listw(list.rock, style="W")
+W3<- knn2nb(knearneigh(coords, k=2), row.names=IDs)
+W4<- knn2nb(knearneigh(coords, k=3), row.names=IDs)
+
+par(mfrow=c(2,2))
+plot(W,coordinates(cri1),main='Queen')
+plot(W2,coordinates(cri1),main='Rock')
+plot(W3,coordinates(cri1),main='Vecinos k=2')
+plot(W4,coordinates(cri1),main='Vecinos k=3')
+
+
+```
+
+Otro enfoque utilizado es denotar dos observaciones como vecinas si están dentro de una cierta distancia
+```{r}
+coords<-coordinates(cri1)
+W_dist<-dnearneigh(coords,0,1,longlat = FALSE)
+W_dist
+```
+
+##Prueba de I de Morgan
+
+Aquí lo probe con diferentes modelos ya que al utilizar esto con el moodelo con todas las variables la prueba no se rechazaba, lo que me dice que no es necesario realizar algún analisis de área ya que el modelo de regresión normal basta para realizar el análisis.
+
+###Para modelo completo
+```{r}
+moran.lm<-lm.morantest(modelo.ols, W)
+print(moran.lm)
+```
+
+##Prueba de lagrange
+```{r}
+LM<-lm.LMtests(modelo.ols, W, test="all")
+print(LM)
+```
+
+
+#Modelos SAR
+El siguiente código ofrece un ejemplo de cómo ajustar un SAR:
+
+```{r}
+# dos maneras de estimar lambda SIN el modelo:
+aple(residuals(modelo.ols), listw=W)
+```
+```{r}
+sar.chi1<-lagsarlm(tasa.pea ~ Viviendas.con.acceso.a.electricidad + Total.de.viviendas +
+patronos.total + Pensiones.RNC, data=cri1@data, W,tol.solve=7.04844e-13)
+summary(sar.chi1)
+```
+
+Con los datos estandarizados
+```{r eval=FALSE}
+#cri1@data$y1<-with(cri1@data,normalize(tasa.pea, method = "standardize"))
+#cri1@data$y2<-with(cri1@data,normalize(P.E.A, method = "standardize"))
+#
+#cri1@data$x1<-with(cri1@data,normalize(Viviendas.con.acceso.a.electricidad, method = "standardize"))
+#cri1@data$x2<-with(cri1@data,normalize(Total.de.viviendas, method = "standardize"))
+#cri1@data$x3<-with(cri1@data,normalize(patronos.total, method = "standardize"))
+#cri1@data$x4<-with(cri1@data,normalize(Pensiones.RNC, method = "standardize"))
+#
+#sar.chi1<-lagsarlm( y1~x1+x2+x3+x4, data=cri1@data, W)
+#summary(sar.chi1)
+#
+#
+#sar.chi2<-lagsarlm(y1~x1+x2+x3+x4, data=cri1@data, W)
+#summary(sar.chi2)
+```
+
+
+
+
+
+#modelos CAR
+Para la tasa
+```{r}
+modelo.car.tasa<-spautolm(
+tasa.pea ~ Viviendas.con.acceso.a.electricidad + 
+  Total.de.viviendas +
+patronos.total + 
+  Pensiones.RNC
+, data=cri1, family="CAR",
+                listw=W)
+summary(modelo.car.tasa)
+```
+
+##comparación de residuales
+
+```{r}
+cri1@data$CAR<-resid(modelo.car.tasa) #residuals ols
+```
+
+
+####Mapas
+##comparación de residuales
+
+```{r}
+cri1@data$OLS<-resid(modelo.ols) #residuals ols
+
+cri1@data$SAR<-resid(sar.chi1) #residual sar
+```
+
+###Modelo para la tasa de la PEA
+REsiduos
+```{r}
+spplot(cri1,"OLS", at=seq(min(cri1@data$OLS,na.rm=TRUE),max(cri1@data$OLS,na.rm=TRUE),length=12),col.regions=rev(brewer.pal(11,"RdBu")),main="Residuos del modelo OLS")
+
+spplot(cri1,"SAR", at=seq(min(cri1@data$SAR,na.rm=TRUE),max(cri1@data$SAR,na.rm=TRUE),length=12),col.regions=rev(brewer.pal(11,"RdBu")),main="Residuos del modelo SAR")
+
+spplot(cri1,"CAR", at=seq(min(cri1@data$CAR,na.rm=TRUE),max(cri1@data$CAR,na.rm=TRUE),length=12),col.regions=rev(brewer.pal(11,"RdBu")),main="Residuos del modelo CAR")
+
+max1<-max(max(cri1@data$OLS,na.rm=TRUE),max(cri1@data$SAR,na.rm=TRUE),max(cri1@data$car,na.rm=TRUE))
+min1<-min(min(cri1@data$OLS,na.rm=TRUE),min(cri1@data$SAR,na.rm=TRUE),min(cri1@data$car,na.rm=TRUE))
+
+spplot(cri1,c("OLS","SAR","CAR"),at=seq(min1,max1,length=12),col.regions=rev(brewer.pal(11,"RdBu")))
+
+#analisis de impacto del modelo SAR
+impacts(sar.chi1, listw=W)
+
+```
+
